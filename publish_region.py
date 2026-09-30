@@ -20,7 +20,7 @@ def gh(*args):
         if result.returncode == 0:
             print(result.stdout.strip())
             return
-        retryable = any(value in result.stderr.lower() for value in ['rate limit', 'http 502', 'http 503', 'timed out', 'connection reset'])
+        retryable = any(value in result.stderr.lower() for value in ['rate limit', 'http 500', 'http 502', 'http 503', 'http 504', 'timed out', 'connection reset'])
         if not retryable or attempt == 7:
             raise SystemExit(result.stderr)
         delay = min(900, 60 * 2 ** attempt)
