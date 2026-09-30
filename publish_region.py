@@ -1,19 +1,31 @@
 """Prepare a validated regional release from a public Geofabrik extract."""
 import argparse
 import hashlib
+import gzip
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 import urllib.request
 import urllib.error
 import urllib.parse
 
 
 def gh(*args):
-    subprocess.run(['gh', *map(str, args)], check=True)
+    for attempt in range(8):
+        result = subprocess.run(['gh', *map(str, args)], capture_output=True, text=True)
+        if result.returncode == 0:
+            print(result.stdout.strip())
+            return
+        retryable = any(value in result.stderr.lower() for value in ['rate limit', 'http 502', 'http 503', 'timed out', 'connection reset'])
+        if not retryable or attempt == 7:
+            raise SystemExit(result.stderr)
+        delay = min(900, 60 * 2 ** attempt)
+        print(f'Publication temporarily limited; retrying in {delay} seconds', flush=True)
+        time.sleep(delay)
 
 
 def main():
@@ -95,7 +107,13 @@ def main():
         areas = catalogue['areas']
         if not areas:
             raise SystemExit('No usable walking areas were generated')
+        # Store independently compressed areas in bounded range-download files.
+        # A phone fetches only its chosen area's byte range, while publishing
+        # requires a handful of assets rather than thousands of API requests.
         files = []
+        blob = None
+        blob_index = 0
+        blob_size = 0
         for index, area in enumerate(areas):
             path = output / f"{region['country']}-{area['id']}.json"
             encoded = path.read_bytes()
@@ -104,9 +122,21 @@ def main():
             package = json.loads(encoded)
             if not package['nodes'] or not package['ways']:
                 raise SystemExit('Empty walking graph')
-            tag = f'maps-{args.region}-{args.version}-p{index//990+1:03d}'
-            area['url'] = f'https://github.com/{args.repo}/releases/download/{tag}/{path.name}'
-            files.append(path)
+            compressed = gzip.compress(encoded, compresslevel=6, mtime=0)
+            if blob is None or blob_size + len(compressed) > 120 * 1024 * 1024:
+                if blob is not None: blob.close()
+                blob_index += 1
+                blob_path = output / f'{args.region}-walking-{blob_index:03d}.bin'
+                files.append(blob_path)
+                blob = blob_path.open('wb')
+                blob_size = 0
+            area['url'] = f'https://github.com/{args.repo}/releases/download/{first_tag}/{blob_path.name}'
+            area['offset'] = blob_size
+            area['download_bytes'] = len(compressed)
+            area['encoding'] = 'gzip'
+            blob.write(compressed)
+            blob_size += len(compressed)
+        if blob is not None: blob.close()
         (output/'catalogue.json').write_text(json.dumps(catalogue,separators=(',',':')))
         tags = []
         for offset in range(0,len(files),990):
