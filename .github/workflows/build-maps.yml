@@ -1,0 +1,65 @@
+name: Prepare licensed walking maps
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: Region slug from regions.json, or all
+        required: true
+        default: nepal
+      version:
+        description: Version label for immutable releases
+        required: true
+        default: '20260930'
+permissions:
+  contents: write
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      regions: ${{ steps.select.outputs.regions }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: select
+        env:
+          SELECTED: ${{ inputs.region }}
+        run: |
+          python - <<'PY'
+          import json, os
+          regions=json.load(open('regions.json'))
+          selected=os.environ['SELECTED']
+          if selected != 'all' and selected not in regions: raise SystemExit('Unknown region')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as output:
+              output.write('regions='+json.dumps(list(regions) if selected=='all' else [selected])+'\n')
+          PY
+  prepare:
+    needs: matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        region: ${{ fromJson(needs.matrix.outputs.regions) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install osmium==4.3.1
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          MAP_REGION: ${{ matrix.region }}
+          MAP_VERSION: ${{ inputs.version }}
+          MAP_REPO: ${{ github.repository }}
+        run: python publish_region.py --region "$MAP_REGION" --version "$MAP_VERSION" --repo "$MAP_REPO"
+  catalogue:
+    if: always() && needs.prepare.result != 'cancelled'
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          MAP_VERSION: ${{ inputs.version }}
+          MAP_REPO: ${{ github.repository }}
+        run: python publish_region.py --region all --catalogue-only --version "$MAP_VERSION" --repo "$MAP_REPO"
