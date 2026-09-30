@@ -8,6 +8,8 @@ import re
 import subprocess
 import tempfile
 import urllib.request
+import urllib.error
+import urllib.parse
 
 
 def gh(*args):
@@ -69,7 +71,21 @@ def main():
         source = region.get('source') or f'https://download.geofabrik.de/north-america/us/{args.region}-latest.osm.pbf'
         extract = folder / 'extract.osm.pbf'
         request = urllib.request.Request(source, headers={'User-Agent':'WigoOfflineMaps/1.0 (+https://github.com/'+args.repo+')'})
-        with urllib.request.urlopen(request, timeout=120) as response, extract.open('wb') as output:
+        try:
+            response = urllib.request.urlopen(request, timeout=120)
+        except urllib.error.HTTPError:
+            # Some latest aliases intermittently loop between a filename and
+            # a trailing slash. Resolve a real dated extract from its official
+            # regional page rather than guessing a date or losing coverage.
+            page = source.replace('-latest.osm.pbf', '.html')
+            with urllib.request.urlopen(page, timeout=60) as listing:
+                html = listing.read().decode('utf-8')
+            candidates = re.findall(r'href=[\"\']([^\"\']*-\d{6}\.osm\.pbf)[\"\']', html)
+            if not candidates:
+                raise SystemExit('No dated extract available on the official region page')
+            source = urllib.parse.urljoin(page, max(candidates, key=lambda url: re.search(r'-(\d{6})\.osm\.pbf', url).group(1)))
+            response = urllib.request.urlopen(urllib.request.Request(source, headers={'User-Agent': 'WigoOfflineMaps/1.0'}), timeout=120)
+        with response, extract.open('wb') as output:
             while block := response.read(1024*1024):
                 output.write(block)
         output = folder / 'maps'
